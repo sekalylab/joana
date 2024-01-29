@@ -18,8 +18,8 @@ input:
 - non-normalized (raw) gene counts: [[CSV]](input/joana.genecounts.csv)  
 - Rhesus genome annotation: [[GTF]](input/joana.genes.gtf)  
 - alignment statistics: [[TSV]](input/joana.ReadStats.txt)  
-- sample annotation: [[XLSX]](input/Joana\ Dias\ bulk\ RNAf\ Sample_tracking\ sheet_03082020.xlsx")  
-- viral load and bnAb concentrations: [[XLSX]](input/Raw\ data\ for\ Slim_JD20200414.xlsx)
+- sample annotation: [[XLSX]](input/Joana_Dias_bulk_RNAf_Sample_tracking_sheet_03082020.xlsx")  
+- viral load and bnAb concentrations: [[XLSX]](input/Raw_data_for_Slim_JD20200414.xlsx)
   
 output:  
 - raw SeqExpressionSet: [[RDA]](output/joana.esetRaw.RData)  

@@ -1,0 +1,436 @@
+---
+title: "Dias/Koup Fig. 6A-B"
+author: "Slim Fourati"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+```{r load-packages, echo=FALSE}
+suppressPackageStartupMessages(library(package = "knitr"))
+suppressPackageStartupMessages(library(package = "EDASeq"))
+suppressPackageStartupMessages(library(package = "limma"))
+suppressPackageStartupMessages(library(package = "ComplexHeatmap"))
+suppressPackageStartupMessages(library(package = "RColorBrewer"))
+suppressPackageStartupMessages(library(package = "circlize"))
+suppressPackageStartupMessages(library(package = "tidyverse"))
+```
+
+```{r session-options, echo=FALSE}
+options(stringsAsFactors  = FALSE,
+        readr.num_columns = 0)
+workDir <- "/Users/sfourat/Desktop/Projects/20200408_Joana/Workspace"
+knitr::opts_chunk$set(echo=FALSE)
+```
+
+<!-- #### redraw f-test heatmaps -->
+```{r load-baselined-expression}
+load(file = file.path(workDir, "data/joana.esetBaselined.RData"))
+esetBaselined$log10.max.vl <- log10(esetBaselined$max.vl)
+
+### define colors
+colAnnotColors <- list(Treatment = c(Untreated     = "grey",
+                                     "WT bNAb Tx"  = "orange",
+                                     "DEL bNAb Tx" = "green"))
+
+discreteAnnotColors <- pData(esetBaselined)[, c("Timepoint", 
+                                                "Cell.population.sorted")] %>%
+  sapply(FUN = unique) %>%
+  stack() %>%
+  mutate(color = brewer.pal(n = n(), name = "Set1"))
+discreteAnnotColors <- split(x = setNames(discreteAnnotColors$color,
+                                          nm = discreteAnnotColors$values), 
+                             f = discreteAnnotColors$ind)
+
+continuousAnnotColors <- pData(esetBaselined)[, c("log10.max.vl",
+                                                  "time2max.vl",
+                                                  "auc.VRC07.523.LS",
+                                                  "auc.PGT121")] %>%
+  lapply(FUN = quantile, probs = c(0, 0.5, 1), na.rm = TRUE)
+colorFunLS <- c("YlGn", "PuRd", "GnBu", "BuPu")
+for (i in 1:length(continuousAnnotColors)) {
+  continuousAnnotColors[[i]] <- colorRamp2(breaks = continuousAnnotColors[[i]],
+                                           colors = brewer.pal(n    = 3,
+                                                               name = colorFunLS[i]))
+}
+
+colAnnotColors <- c(colAnnotColors, discreteAnnotColors, continuousAnnotColors)
+```
+
+```{r load-fits}
+load(file = file.path(workDir, "data/joana.fits.RData"))
+```
+
+<!-- #### plot NES heatmaps for Hallmark genesets -->
+```{r load-gsea-res}
+load(file = file.path(workDir, "data/joana.gseaOutput.RData"))
+```
+
+# Figure 5C
+```{r fig5c, fig.height=8, fig.width=6, fig.align="left"}
+MODELNAME <- "monocytes_vax"
+  sigGS <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                    !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    grepl(pattern = "HALLMARK_", NAME) &
+                    `FDR q-val` <= 0.05) %>%
+    .$NAME
+
+  
+  nesMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS) %>%
+    select(NES, contrast, NAME) %>%
+    pivot_wider(names_from = contrast, values_from = NES) %>%
+    column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  heat <- Heatmap(matrix        = nesMat,
+                  name          = "NES",
+                  column_title  = "Monocytes",
+                  width         = unit(2, units = "in"),
+                  height        = unit(0.4 * nrow(nesMat), units = "in"),
+                  row_names_gp  = gpar(fontsize = 8),
+                  show_row_dend = FALSE,
+                  column_labels = gsub(pattern     = "Untreated",
+                                       replacement = "UnTx",
+                                       colnames(nesMat)) %>%
+                                  gsub(pattern    = "D14",
+                                       replacement = "wk2"),
+                  row_labels = gsub(pattern = "HALLMARK_",
+                                    replacement = "",
+                                    rownames(nesMat)),
+                  column_names_gp = gpar(col = c("green", "green", "grey", "orange", "orange")))
+  print(heat)
+```
+
+# Figure 5C with stars for significant enrichment (nominal p-val <= 0.05)
+```{r fig5c-star, fig.height=8, fig.width=6, fig.align="left"}
+MODELNAME <- "monocytes_vax"
+  sigGS <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                    !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    grepl(pattern = "HALLMARK_", NAME) &
+                    `FDR q-val` <= 0.05) %>%
+    .$NAME
+
+  
+  nesMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS) %>%
+    select(NES, contrast, NAME) %>%
+    pivot_wider(names_from = contrast, values_from = NES) %>%
+    column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  pMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS) %>%
+  select(NAME, contrast, `NOM p-val`) %>%
+  pivot_wider(names_from = contrast, values_from = `NOM p-val`) %>%
+  column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  heat <- Heatmap(matrix        = nesMat,
+                  name          = "NES",
+                  column_title  = "Monocytes",
+                  width         = unit(2, units = "in"),
+                  height        = unit(0.4 * nrow(nesMat), units = "in"),
+                  row_names_gp  = gpar(fontsize = 8),
+                  show_row_dend = FALSE,
+                  column_labels = gsub(pattern     = "Untreated",
+                                       replacement = "UnTx",
+                                       colnames(nesMat)) %>%
+                                  gsub(pattern    = "D14",
+                                       replacement = "wk2"),
+                  row_labels = gsub(pattern = "HALLMARK_",
+                                    replacement = "",
+                                    rownames(nesMat)),
+                  column_names_gp = gpar(col = c("green", "green", "grey", "orange", "orange")),
+                  cell_fun = function(j, i, x, y, width, height, fill) {
+        if (pMat[i, j] < 0.05) {
+	  grid.text(label = "*", x, y, gp = gpar(fontsize = 10))
+	}})
+print(heat)
+```
+
+# Figure 5C with grey cells for non-significant enrichment (nominal p-val > 0.05)
+```{r fig5c-grey, fig.height=8, fig.width=6, fig.align="left"}
+MODELNAME <- "monocytes_vax"
+  sigGS <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                    !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    grepl(pattern = "HALLMARK_", NAME) &
+                    `FDR q-val` <= 0.05) %>%
+    .$NAME
+
+  
+  nesMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS) %>%
+    select(NES, contrast, NAME) %>%
+    pivot_wider(names_from = contrast, values_from = NES) %>%
+    column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  nesNaMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS & 
+                      `NOM p-val` <= 0.05) %>%
+  select(NES, contrast, NAME) %>%
+    pivot_wider(names_from = contrast, values_from = NES) %>%
+    column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  nesNaMat <- nesNaMat[rownames(nesMat), colnames(nesMat)]
+  heat <- Heatmap(matrix        = nesNaMat,
+                  name          = "NES",
+                  column_title  = "Monocytes",
+                  width         = unit(2, units = "in"),
+                  height        = unit(0.4 * nrow(nesNaMat), units = "in"),
+                  row_names_gp  = gpar(fontsize = 8),
+                  show_row_dend = FALSE,
+                  clustering_distance_rows = dist(nesMat),
+                  clustering_distance_columns = dist(t(nesMat)),
+                  column_labels = gsub(pattern     = "Untreated",
+                                       replacement = "UnTx",
+                                       colnames(nesNaMat)) %>%
+                                  gsub(pattern    = "D14",
+                                       replacement = "wk2"),
+                  row_labels = gsub(pattern = "HALLMARK_",
+                                    replacement = "",
+                                    rownames(nesNaMat)),
+                  column_names_gp = gpar(col = c("green", "green", "grey", "orange", "orange")))
+print(heat)
+```
+
+# Figure 5D
+```{r fig5d, fig.height=8, fig.width=6, fig.align="left"}
+MODELNAME <- "NK cells_vax"
+  sigGS <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                    !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    grepl(pattern = "HALLMARK_", NAME) &
+                    `FDR q-val` <= 0.05) %>%
+    .$NAME
+
+  
+  nesMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS) %>%
+    select(NES, contrast, NAME) %>%
+    pivot_wider(names_from = contrast, values_from = NES) %>%
+    column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  heat <- Heatmap(matrix        = nesMat,
+                  name          = "NES",
+                  column_title  = "NK cells",
+                  width         = unit(2, units = "in"),
+                  height        = unit(0.4 * nrow(nesMat), units = "in"),
+                  row_names_gp  = gpar(fontsize = 8),
+                  show_row_dend = FALSE,
+                  column_labels = gsub(pattern     = "Untreated",
+                                       replacement = "UnTx",
+                                       colnames(nesMat)) %>%
+                                  gsub(pattern    = "D14",
+                                       replacement = "wk2"),
+                  row_labels = gsub(pattern = "HALLMARK_",
+                                    replacement = "",
+                                    rownames(nesMat)),
+                  column_names_gp = gpar(col = c("green", "green", "grey", "orange", "orange")))
+  print(heat)
+```
+
+# Figure 5D with stars for significant enrichment (nominal p-val <= 0.05)
+```{r fig5d-star, fig.height=8, fig.width=6, fig.align="left"}
+MODELNAME <- "NK cells_vax"
+  sigGS <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                    !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    grepl(pattern = "HALLMARK_", NAME) &
+                    `FDR q-val` <= 0.05) %>%
+    .$NAME
+
+  
+  nesMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS) %>%
+    select(NES, contrast, NAME) %>%
+    pivot_wider(names_from = contrast, values_from = NES) %>%
+    column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  pMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS) %>%
+  select(NAME, contrast, `NOM p-val`) %>%
+  pivot_wider(names_from = contrast, values_from = `NOM p-val`) %>%
+  column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  heat <- Heatmap(matrix        = nesMat,
+                  name          = "NES",
+                  column_title  = "NK cells",
+                  width         = unit(2, units = "in"),
+                  height        = unit(0.4 * nrow(nesMat), units = "in"),
+                  row_names_gp  = gpar(fontsize = 8),
+                  show_row_dend = FALSE,
+                  column_labels = gsub(pattern     = "Untreated",
+                                       replacement = "UnTx",
+                                       colnames(nesMat)) %>%
+                                  gsub(pattern    = "D14",
+                                       replacement = "wk2"),
+                  row_labels = gsub(pattern = "HALLMARK_",
+                                    replacement = "",
+                                    rownames(nesMat)),
+                  column_names_gp = gpar(col = c("green", "green", "grey", "orange", "orange")),
+                  cell_fun = function(j, i, x, y, width, height, fill) {
+        if (pMat[i, j] < 0.05) {
+	  grid.text(label = "*", x, y, gp = gpar(fontsize = 10))
+	}})
+print(heat)
+```
+
+# Figure 5D with grey cells for non-significant enrichment (nominal p-val > 0.05)
+```{r fig5d-grey, fig.height=8, fig.width=6, fig.align="left"}
+MODELNAME <- "NK cells_vax"
+  sigGS <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                    !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    grepl(pattern = "HALLMARK_", NAME) &
+                    `FDR q-val` <= 0.05) %>%
+    .$NAME
+
+  
+  nesMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS) %>%
+    select(NES, contrast, NAME) %>%
+    pivot_wider(names_from = contrast, values_from = NES) %>%
+    column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  nesNaMat <- filter(gseaOutput, `modelName` %in% MODELNAME & 
+                     !(contrast %in% "Untreated.D14-Untreated.pre") &
+                    NAME %in% sigGS & 
+                      `NOM p-val` <= 0.05) %>%
+  select(NES, contrast, NAME) %>%
+    pivot_wider(names_from = contrast, values_from = NES) %>%
+    column_to_rownames(var = "NAME") %>%
+    as.matrix()
+  nesNaMat <- nesNaMat[rownames(nesMat), colnames(nesMat)]
+  heat <- Heatmap(matrix        = nesNaMat,
+                  col           = colorRamp2(breaks = c(-1, 0, 1),
+                                           colors = c("blue", "white", "red")),
+                  name          = "NES",
+                  column_title  = "NK cells",
+                  width         = unit(2, units = "in"),
+                  height        = unit(0.4 * nrow(nesNaMat), units = "in"),
+                  row_names_gp  = gpar(fontsize = 8),
+                  show_row_dend = FALSE,
+                  clustering_distance_rows = dist(nesMat),
+                  clustering_distance_columns = dist(t(nesMat)),
+                  column_labels = gsub(pattern     = "Untreated",
+                                       replacement = "UnTx",
+                                       colnames(nesNaMat)) %>%
+                                  gsub(pattern    = "D14",
+                                       replacement = "wk2"),
+                  row_labels = gsub(pattern = "HALLMARK_",
+                                    replacement = "",
+                                    rownames(nesNaMat)),
+                  column_names_gp = gpar(col = c("green", "green", "grey", "orange", "orange")))
+print(heat)
+```
+
+# Suppl. Figure 8A
+```{r sup-fig8a, fig.align='left', fig.width=8, fig.height=10}
+message("Significant enrichment use to draw heatmap")
+filter(gseaOutput,
+                  NAME %in% "HALLMARK_IL6_JAK_STAT3_SIGNALING",
+                  modelName %in% "monocytes_vax" &
+                    `NOM p-val` <= 0.05 &
+                    NES > 0 &
+                    !grepl(pattern = "Untreated", contrast)) %>%
+  select(modelName, contrast, NAME, NES, `NOM p-val`, `FDR q-val`) %>%
+  kable()
+
+leGenes <- filter(gseaOutput,
+                  NAME %in% "HALLMARK_IL6_JAK_STAT3_SIGNALING",
+                  modelName %in% "monocytes_vax" &
+                    `NOM p-val` <= 0.05 &
+                    NES > 0 &
+                    !grepl(pattern = "Untreated", contrast)) %>%
+  .$LEADING_EDGE %>%
+  strsplit(split = ",") %>%
+  unlist() %>%
+  unique()
+
+sampleLS <- rownames(fits[["monocytes_vax"]][["fit2"]]$design)
+sampleLS <- intersect(sampleLS, sampleNames(esetBaselined))
+mat <- normCounts(esetBaselined)[fData(esetBaselined)$gene_name %in% leGenes, 
+                                 sampleLS, drop = FALSE]
+mat <- mat[complete.cases(mat), ]
+matAnnot <- pData(esetBaselined) %>%
+      rownames_to_column() %>%
+      select(rowname, Timepoint, Treatment,
+	     log10.max.vl) %>%
+      column_to_rownames()
+matAnnot <- matAnnot[colnames(mat), ]
+ha <- HeatmapAnnotation(df  = matAnnot,
+                            col = colAnnotColors)
+    splitCols <- pData(esetBaselined)[colnames(mat),
+			     c("Timepoint", "Treatment")] %>%
+      apply(MARGIN = 1, FUN = paste, collapse = ".")
+    heat <- Heatmap(matrix         = mat,
+		                width          = unit(0.5, units = "npc"),
+		                height         = unit(0.7, units = "npc"),
+		                top_annotation = ha,
+		                name           = "log2FC",
+		                column_title   = "Monocytes: IL6/JAK/STAT signaling",
+		                row_labels = fData(esetBaselined)[rownames(mat), "gene_name"],
+		                column_labels  = pData(esetBaselined)[colnames(mat),
+						                                              "Monkey.ID"],
+		                column_split   = splitCols)
+    print(heat)
+```
+Only DEL.wk8 DEGs were used because IL6-JAK-STAT was not significant at wk2 
+
+# Suppl. Figure 8A with DEL.wk2 DEGs
+```{r sup-fig8a-ns, fig.align='left', fig.width=8, fig.height=10}
+message("Enrichment use to draw heatmap")
+filter(gseaOutput,
+                  NAME %in% "HALLMARK_IL6_JAK_STAT3_SIGNALING",
+                  modelName %in% "monocytes_vax" &
+                    `NOM p-val` <= 0.25 &
+                    NES > 0 &
+                    !grepl(pattern = "Untreated", contrast)) %>%
+  select(modelName, contrast, NAME, NES, `NOM p-val`, `FDR q-val`) %>%
+  kable()
+
+leGenes <- filter(gseaOutput,
+                  NAME %in% "HALLMARK_IL6_JAK_STAT3_SIGNALING",
+                  modelName %in% "monocytes_vax" &
+                    `NOM p-val` <= 0.25 &
+                    NES > 0 &
+                    !grepl(pattern = "Untreated", contrast)) %>%
+  .$LEADING_EDGE %>%
+  strsplit(split = ",") %>%
+  unlist() %>%
+  unique()
+
+sampleLS <- rownames(fits[["monocytes_vax"]][["fit2"]]$design)
+sampleLS <- intersect(sampleLS, sampleNames(esetBaselined))
+mat <- normCounts(esetBaselined)[fData(esetBaselined)$gene_name %in% leGenes, 
+                                 sampleLS, drop = FALSE]
+mat <- mat[complete.cases(mat), ]
+matAnnot <- pData(esetBaselined) %>%
+      rownames_to_column() %>%
+      select(rowname, Timepoint, Treatment,
+	     log10.max.vl) %>%
+      column_to_rownames()
+matAnnot <- matAnnot[colnames(mat), ]
+ha <- HeatmapAnnotation(df  = matAnnot,
+                            col = colAnnotColors)
+    splitCols <- pData(esetBaselined)[colnames(mat),
+			     c("Timepoint", "Treatment")] %>%
+      apply(MARGIN = 1, FUN = paste, collapse = ".")
+    heat <- Heatmap(matrix         = mat,
+		                width          = unit(0.5, units = "npc"),
+		                height         = unit(0.7, units = "npc"),
+		                top_annotation = ha,
+		                name           = "log2FC",
+		                column_title   = "Monocytes: IL6/JAK/STAT signaling",
+		                row_labels = fData(esetBaselined)[rownames(mat), "gene_name"],
+		                column_labels  = pData(esetBaselined)[colnames(mat),
+						                                              "Monkey.ID"],
+		                column_split   = splitCols)
+    print(heat)
+```
+```{r session-info, eval=FALSE}
+sessionInfo()
+```
