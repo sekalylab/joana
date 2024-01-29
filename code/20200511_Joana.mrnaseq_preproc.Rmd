@@ -1,0 +1,1062 @@
+---
+title: "Dias/Koup preprocessing of RNA-Seq data (set 1)"
+author: "Slim Fourati"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+```{r load-packages}
+suppressPackageStartupMessages(library(package = "knitr"))
+suppressPackageStartupMessages(library(package = "readxl"))
+suppressPackageStartupMessages(library(package = "zoo"))
+suppressPackageStartupMessages(library(package = "ggbeeswarm"))
+suppressPackageStartupMessages(library(package = "caTools"))
+suppressPackageStartupMessages(library(package = "EDASeq"))
+suppressPackageStartupMessages(library(package = "pvca")) # dleelab/pvca
+suppressPackageStartupMessages(library(package = "lme4"))
+suppressPackageStartupMessages(library(package = "parallelDist"))
+suppressPackageStartupMessages(library(package = "parallel"))
+suppressPackageStartupMessages(library(package = "edgeR"))
+suppressPackageStartupMessages(library(package = "ggrepel"))
+suppressPackageStartupMessages(library(package = "ComplexHeatmap"))
+suppressPackageStartupMessages(library(package = "tidyverse"))
+```
+
+```{r session-options}
+opts_chunk$set(echo = TRUE, fig.path = "../figure/")
+options(readr.show_col_types   = FALSE,
+        dplyr.summarise.inform = FALSE)
+workDir <- dirname(getwd())
+```
+
+Reading raw counts
+```{r read-counts}
+countDF <- read_csv(file = file.path(workDir, "input/joana.genecounts.csv")) %>%
+  as.data.frame() %>%
+  column_to_rownames(var = "gene_id")
+message("First five rows/columns of count matrix")
+print(countDF[1:5, 1:5])
+message("Dimensions of the count matrix")
+print(dim(countDF))
+```
+
+Read sample annotation
+```{r read-rnaseq-samplesheet}
+sampleAnnotFile <- file.path(workDir,
+                             "input",
+                             "Joana Dias bulk RNAf Sample_tracking sheet_03082020.xlsx")
+# read each plates
+sheetLS <- excel_sheets(path = sampleAnnotFile)
+sampleAnnotDF <- lapply(sheetLS, function(sheetName) {
+  sampleAnnotTemp <- read_excel(path = sampleAnnotFile, sheet = sheetName) %>%
+    mutate(Plate = sheetName)
+  return(value = sampleAnnotTemp)
+}) %>%
+  do.call(what = rbind)
+# append sample id
+sampleAnnotDF <- sampleAnnotDF %>%
+  mutate(rowname = paste(`Monkey ID`,
+                         Timepoint,
+                         `Cell population sorted`,
+                         sep = "_"),
+         rowname = gsub(pattern = " ", replacement = "", rowname)) %>%
+  setNames(nm = make.names(names = names(.))) %>%
+  as.data.frame() %>%
+  column_to_rownames(var = "rowname")
+sampleAnnotDF <- sampleAnnotDF[colnames(countDF), ]
+# TotalReads counted
+sampleAnnotDF$TotalReads <- colSums(countDF)
+message("print header of sample annotation")
+print(sampleAnnotDF[1:5, 1:5])
+message("Number of animal w/ RNA-seq data")
+sampleAnnotDF %>%
+  .$Monkey.ID %>%
+  unique() %>%
+  length() %>%
+  print()
+message("Number of timepoints and subsets w/ RNA-seq data")
+sampleAnnotDF %>%
+  select(Monkey.ID, Timepoint, Cell.population.sorted) %>%
+  distinct() %>%
+  group_by(Timepoint, Cell.population.sorted) %>%
+  summarize(n = n()) %>%
+  ungroup() %>%
+  mutate(Timepoint = factor(Timepoint, levels = c("pre", "D14", "wk8"))) %>%
+  pivot_wider(names_from = Cell.population.sorted, values_from = n) %>%
+  arrange(Timepoint) %>%
+  print()
+```
+Transcriptomic profiles of 17 animals for 5 subsets at 3 timepoints was
+performed
+
+Read viral load
+```{r read-vl}
+vlFile <- file.path(workDir,
+                    "input/Raw data for Slim_JD20200414.xlsx")
+vlDF <- read_excel(path      = vlFile,
+                   skip      = 2,
+                   col_names = paste0("X", 1:8)) %>%
+  mutate(Treatment = factor(X1,
+                            levels = c("Untreated", "WT bNAb Tx", "DEL bNAb Tx")),
+         Treatment = na.locf(Treatment)) %>%
+  filter(X1 != Treatment & !is.na(X1))
+
+by(vlDF, INDICES = vlDF$Treatment, FUN = function(x) {
+  cNames <- as.vector(unlist(x[1, ]))
+  cNames[length(cNames)] <- "Treatment"
+  x <- x[-1, ]
+  colnames(x) <- cNames
+  x <- x %>%
+    pivot_longer(cols = cNames[3:8],
+                 names_to = "Animal ID",
+		 values_to = "Plasma viral loads (copies/mL)")
+  return(value = x)
+}) %>%
+  do.call(what = rbind) -> vlDF
+```
+
+```{r plot-vl-week, fig.width=4.69, fig.height=3.07}
+plotDF <- vlDF %>%
+  select(-`day post-challenge`) %>%
+  mutate(`week post-challenge` = as.numeric(`week post-challenge`),
+         `Plasma viral loads (copies/mL)` =
+           gsub(pattern = "below |Below ",
+                replacement = "",
+                `Plasma viral loads (copies/mL)`),
+         `Plasma viral loads (copies/mL)` =
+           as.numeric(`Plasma viral loads (copies/mL)`))
+
+ggplot(data = plotDF,
+       mapping = aes(x = `week post-challenge`,
+                     y = `Plasma viral loads (copies/mL)`)) +
+  geom_line(mapping = aes(group = `Animal ID`, color = Treatment), linewidth = 1.1) +
+  scale_y_log10() +
+  scale_color_manual(values = c("Untreated" = "grey",
+                                "WT bNAb Tx" = "orange",
+				"DEL bNAb Tx" = "green")) +
+  theme_bw()
+```
+
+```{r plot-max-vl, fig.width=4.69, fig.height=3.07, warning=FALSE}
+maxDF <- plotDF %>%
+  group_by(Treatment, `Animal ID`) %>%
+  summarize(max.vl = max(`Plasma viral loads (copies/mL)`))
+
+ggplot(data = maxDF,
+       mapping = aes(x = Treatment, y = max.vl)) +
+  geom_boxplot(fill = "transparent") +
+  geom_beeswarm(mapping = aes(color = Treatment), cex = 3, size = 2) +
+  scale_y_log10() +
+  labs(y = "Max plasma viral loads (copies/mL)") +
+  scale_color_manual(values = c("Untreated"   = "grey",
+                                "WT bNAb Tx"  = "orange",
+                                "DEL bNAb Tx" = "green")) +
+  theme_bw()
+
+kruskal.test(x = maxDF$max.vl, g = maxDF$Treatment)
+pairwise.wilcox.test(x = maxDF$max.vl, g = maxDF$Treatment, p.adjust.method = "none")
+
+# append to sample annotation
+sampleAnnotDF %>%
+  rownames_to_column() %>%
+  merge(y = maxDF, by.x = "Monkey.ID", by.y = "Animal ID") %>%
+  column_to_rownames() -> sampleAnnotDF
+sampleAnnotDF <- sampleAnnotDF[colnames(countDF), ]
+```
+
+```{r plot-time-to-max-vl, fig.width=4.69, fig.height=3.07, warning=FALSE}
+time2maxDF <- plotDF %>%
+  arrange(desc(`week post-challenge`)) %>%
+  group_by(Treatment, `Animal ID`) %>%
+  summarize(time2max.vl = `week post-challenge`[which.max(`Plasma viral loads (copies/mL)`)]) %>%
+  ungroup()
+
+ggplot(data = time2maxDF,
+       mapping = aes(x = Treatment, y = time2max.vl)) +
+  geom_boxplot(fill = "transparent") +
+  geom_beeswarm(mapping = aes(color = Treatment), cex = 3, size = 2) +
+  labs(y = "Time to max plasma viral loads (weeks)") +
+  scale_color_manual(values = c("Untreated"   = "grey",
+                                "WT bNAb Tx"  = "orange",
+                                "DEL bNAb Tx" = "green")) +
+  theme_bw()
+
+kruskal.test(x = time2maxDF$time2max.vl, g = time2maxDF$Treatment)
+pairwise.wilcox.test(x = time2maxDF$time2max.vl,
+                     g = time2maxDF$Treatment,
+                     p.adjust.method = "none")
+
+sampleAnnotDF %>%
+  rownames_to_column() %>%
+  merge(y = select(time2maxDF, -Treatment),
+        by.x = "Monkey.ID",
+        by.y = "Animal ID") %>%
+  column_to_rownames() -> sampleAnnotDF
+sampleAnnotDF <- sampleAnnotDF[colnames(countDF), ]
+```
+
+Read bNAb concentration
+```{r read-bnab}
+bnabFile <- file.path(workDir,
+		                  "input/Raw data for Slim_JD20200414.xlsx")
+bnabDF <- read_excel(path      = bnabFile,
+		                 sheet     = 2,
+		                 skip      = 2,
+		                 col_names = paste0("X", 1:8)) %>%
+  mutate(bNab = factor(X1,
+		       levels = c("WT bNAb Tx_[VRC07-523-LS]",
+				  "WT bNAb Tx_[PGT121]",
+				  "DEL bNAb Tx_[VRC07-523-LS/DEL]",
+				  "DEL bNAb Tx_[PGT121/DEL]")),
+	 bNab = na.locf(bNab)) %>%
+  filter(X1 != bNab & !is.na(X1))
+
+by(bnabDF, INDICES = bnabDF$bNab, FUN = function(x) {
+  cNames <- as.vector(unlist(x[1, ]))
+  cNames[length(cNames)] <- "bNab"
+  x <- x[-1, ]
+  colnames(x) <- cNames
+  x <- x %>%
+    pivot_longer(cols = cNames[3:8],
+		 names_to = "Animal ID",
+		 values_to = "Plasma bNAb concentration (ug/mL)")
+  return(value = x)
+}) %>%
+  do.call(what = rbind) -> bnabDF
+
+bnabDF <- bnabDF %>%
+  mutate(`Plasma bNAb concentration (ug/mL)` =
+	   as.numeric(`Plasma bNAb concentration (ug/mL)`),
+	 `week post-challenge` = as.numeric(`week post-challenge`))
+```
+
+```{r plot-bnab, fig.width=6, fig.height=3.07, warning=FALSE}
+ggplot(data = bnabDF,
+       mapping = aes(x = `week post-challenge`,
+		     y = `Plasma bNAb concentration (ug/mL)`)) +
+  geom_line(mapping = aes(by = `Animal ID`, color = bNab)) +
+  scale_color_manual(values = c("WT bNAb Tx_[VRC07-523-LS]"      = "red",
+	                         			"WT bNAb Tx_[PGT121]"            = "darkblue",
+				                        "DEL bNAb Tx_[VRC07-523-LS/DEL]" = "orange",
+				                        "DEL bNAb Tx_[PGT121/DEL]"       = "lightblue"),
+		                 name = "bNAb") +
+  theme_bw()
+```
+
+```{r plot-bnab-auc, echo=FALSE, fig.width=6, fig.height=5}
+aucDF <- bnabDF %>%
+  filter(!is.na(`Plasma bNAb concentration (ug/mL)`)) %>%
+  group_by(`Animal ID`, bNab) %>%
+  summarize(auc = trapz(`week post-challenge`,
+                        `Plasma bNAb concentration (ug/mL)`))
+ggplot(data = aucDF,
+       mapping = aes(x = bNab, y = auc)) +
+  geom_boxplot(fill = "transparent",
+               mapping = aes(color = bNab),
+               outlier.color = "transparent") +
+  geom_beeswarm(cex = 2) +
+  scale_color_manual(values = c("WT bNAb Tx_[VRC07-523-LS]"      = "red",
+                                "WT bNAb Tx_[PGT121]"            = "darkblue",
+                                "DEL bNAb Tx_[VRC07-523-LS/DEL]" = "orange",
+                                "DEL bNAb Tx_[PGT121/DEL]"       = "lightblue"),
+                     name = "bNAb") +
+  labs(x = "bNAb", y = "AUC") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+
+kruskal.test(x = aucDF$auc, g = aucDF$bNab)
+
+aucDF2 <- aucDF %>%
+  mutate(bNab = gsub(pattern     = ".+\\[|\\]|/DEL",
+                     replacement = "",
+                     bNab)) %>%
+  pivot_wider(names_from = "bNab", values_from = "auc", names_prefix = "auc.") %>%
+  setNames(nm = make.names(names(.)))
+
+sampleAnnotDF %>%
+  rownames_to_column() %>%
+  merge(y    = aucDF2,
+        by.x = "Monkey.ID",
+        by.y = "Animal.ID",
+        all.x = TRUE) %>%
+  column_to_rownames() -> sampleAnnotDF
+sampleAnnotDF <- sampleAnnotDF[colnames(countDF), ]
+```
+
+```{r stat-vl-bnab, warning=FALSE, fig.align="left", fig.width=5.1, fig.height=3.4}
+statDF <- sampleAnnotDF %>%
+  mutate(log10.max.vl = log10(max.vl))  %>%
+  select(Monkey.ID, log10.max.vl, time2max.vl, auc.VRC07.523.LS, auc.PGT121,
+	 Treatment) %>%
+  distinct()
+message("correlation between max VL and bNAb in plasma:")
+cor.test(formula = ~log10.max.vl+auc.VRC07.523.LS,
+	 data = statDF,
+	 method  = "spearman")
+cor.test(formula = ~log10.max.vl+auc.PGT121,
+	 data = statDF,
+	 method  = "spearman")
+message("correlation between time to max VL and bNAb in plasma:")
+cor.test(formula = ~time2max.vl+auc.VRC07.523.LS,
+	 data = statDF,
+	 method  = "spearman")
+cor.test(formula = ~time2max.vl+auc.PGT121,
+	 data = statDF,
+	 method  = "spearman")
+
+plotDF <- statDF %>%
+  pivot_longer(cols = c(auc.VRC07.523.LS, auc.PGT121),
+	       names_to = "bNAb",
+	       values_to = "AUC")
+ggplot(data = plotDF,
+       mapping = aes(x = time2max.vl, y = AUC)) +
+  geom_point(mapping = aes(color = bNAb, shape = Treatment)) +
+  theme_bw()
+```
+non significant positive correlation between time to max VL and bNAb.  
+  
+Read gene annotation
+```{r read-feature-annotation}
+colNames <- c("seqname",
+              "source",
+              "feature",
+              "start",
+              "end",
+              "score",
+              "strand",
+              "frame",
+              "attribute")
+colTypes <- paste(c(rep("c", times = 3),
+                    rep("i", times = 2),
+                    rep("c", times = 4)),
+                  collapse = "")
+featuresAnnotationFile <- file.path(workDir, "input/joana.genes.gtf")
+skipNb <- read_lines(file = featuresAnnotationFile)
+skipNb <- sum(grepl(pattern = "^#", skipNb))
+
+featuresAnnot <- read_tsv(file      = featuresAnnotationFile,
+                          skip      = skipNb,
+                          col_names = colNames,
+                          col_types = colTypes)
+# extract gene_id and transcript_id from attributes
+featAnnot <- featuresAnnot %>%
+  mutate(gene_id = gsub(pattern = ".*gene_id \"([^;]+)\";.+",
+                        replacement = "\\1",
+                        attribute),
+         gene_name = ifelse(test = grepl(pattern = "gene_name",
+                                         attribute),
+                            yes = gsub(pattern = ".+gene_name \"([^;]+)\";.+",
+                                       replacement = "\\1",
+                                       attribute),
+                            no  = NA),
+         gene_biotype = ifelse(test = grepl(pattern = "gene_biotype",
+                                         attribute),
+                            yes = gsub(pattern = ".+gene_biotype \"([^;]+)\";.*",
+                                       replacement = "\\1",
+                                       attribute),
+                            no  = NA)) %>%
+  select(seqname, strand, gene_id, gene_name, gene_biotype) %>%
+  distinct() %>%
+  as.data.frame()
+rownames(featAnnot) <- featAnnot$gene_id
+featAnnot <- featAnnot[rownames(countDF), ]
+cat("Number of genes annotated")
+featAnnot %>%
+    group_by(gene_biotype) %>%
+    summarize(n = n()) %>%
+    arrange(desc(n))
+```
+
+Build raw SeqExpressionSet
+```{r build-raw-seqset}
+# build  raw ExpressionSet
+esetRaw <- newSeqExpressionSet(counts      = as.matrix(countDF),
+                               featureData = AnnotatedDataFrame(featAnnot),
+                               phenoData   = AnnotatedDataFrame(sampleAnnotDF))
+save(esetRaw, file = file.path(workDir, "output/joana.esetRaw.RData"))
+print(esetRaw)
+```
+
+```{r load-raw-seqset, echo=FALSE}
+load(file = file.path(workDir, "output/joana.esetRaw.RData"))
+```
+
+Barplot with read alignment statistics
+```{r qc-align-stat, echo=FALSE, fig.width=8, fig.height=4, fig.align="left", warning=FALSE}
+statDF <- read_tsv(file      = file.path(workDir, "input/joana.ReadStats.txt"),
+                   col_names = FALSE) %>%
+  distinct() %>%
+  spread(X3, X2)
+plotDF <- counts(esetRaw) %>% 
+  colSums() %>%
+  data.frame(Counted = .) %>%
+  rownames_to_column() %>%
+  merge(x = statDF, by.x = "X1", by.y = "rowname")
+
+plotDF <- plotDF %>%
+  mutate(Trimmed    = TotalReads - Surviving,
+         NotMapped  = Surviving - UniqMapped - Multimapped,
+         NotCounted = UniqMapped + Multimapped - Counted) %>%
+  select(Trimmed, NotMapped, NotCounted, Counted, X1) %>%
+  arrange(Counted) %>% 
+  mutate(X1 = factor(X1, levels = unique(X1))) %>%
+  gather(key, value, -X1)
+ggplot(data = plotDF,
+       mapping = aes(x = X1, y = value, fill = key)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "Samples", y = "Number of reads") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+
+message("number of samples with more than 2e06 counted reads")
+plotDF %>%
+  filter(key %in% "Counted") %>%
+  mutate(over10e6 = value >= 2.1e06) %>%
+  group_by(over10e6) %>%
+  summarize(n())
+``` 
+All samples except 25 have more than 2 million reads and can be used for diff. expression analysis.  
+  
+Barplot with mapped reads statistics
+```{r qc-mRNA, fig.height=4, fig.width=8, fig.align="left"}
+plotDF <- counts(esetRaw) %>%
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  merge(y    = select(fData(esetRaw), gene_id, gene_biotype),
+        by.x = "rowname",
+        by.y = "gene_id") %>%
+  mutate(gene_biotype = ifelse(test = grepl(pattern = "pseudogene",
+                                            gene_biotype),
+                               yes = "pseudogene",
+                               no  = gene_biotype),
+         gene_biotype = ifelse(test = gene_biotype %in% 
+                                 c("miRNA", "lincRNA", "snoRNA",
+                                   "sRNA", "snRNA", "vaultRNA",
+                                   "3prime_overlapping_ncrna",
+                                   "macro_lncRNA", "scaRNA"),
+                               yes = "ncrna",
+                               no = gene_biotype),
+         gene_biotype = ifelse(test = gene_biotype %in% 
+                                 c("antisense",
+                                   "ncRNA",
+                                   "Mt_rRNA",
+                                   "Mt_tRNA",
+                                   "protein_coding",
+                                   "pseudogene",
+                                   "ribozyme",
+                                   "rRNA"),
+                               yes = gene_biotype,
+                               no  = "other")) %>%
+  gather(sample, value, -rowname, -gene_biotype) %>%
+  group_by(sample, gene_biotype) %>%
+  summarize(eta = sum(value),
+            mu  = mean(value),
+            q2  = median(value)) %>%
+  ungroup() %>%
+  arrange(!grepl("Water", `sample`)) %>% 
+  mutate(`sample` = factor(`sample`, levels = unique(`sample`)))
+
+ggplot(data = plotDF,
+       mapping = aes(x = sample, y = eta, fill = gene_biotype)) +
+  geom_bar(stat = "identity") +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "Samples", y = "Number of reads") +
+  theme_bw() +
+  theme(axis.text.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank())
+message("percentage of reads that are from protein coding")
+plotDF %>% 
+  group_by(sample) %>%
+  summarize(n = sum(eta)) %>%
+  merge(y = plotDF) %>%
+  filter(gene_biotype %in% "protein_coding") %>%
+  mutate(perc_prot_cod = eta/n * 100) %>%
+  summarize(type = "perc_prot_coding",
+            min  = min(.$perc_prot_cod, na.rm = TRUE),
+            max  = max(.$perc_prot_cod, na.rm = TRUE)) 
+``` 
+As expected, most counted reads are mapped to protein coding genes.  
+  
+Principal variance component analysis (raw)
+```{r pvca, fig.height=4, fig.width=4, fig.align="left", message=FALSE, warning=FALSE}
+esetTemp <- ExpressionSet(assayData = log2(counts(esetRaw) + 0.25),
+                          phenoData = AnnotatedDataFrame(data = pData(esetRaw)))
+
+esetTemp$TotalReadsQ3 <- cut(esetTemp$TotalReads,
+                             breaks         = quantile(esetTemp$TotalReads,
+                                                       probs = c(0,0.33, 0.66,1)),
+                             include.lowest = TRUE,
+                             right          = TRUE)
+esetTemp$NumberCellsQ3 <- cut(esetTemp$Number.of.Cells,
+                              breaks         = c(0, 1500, 3000, 5000),
+                              include.lowest = TRUE,
+                              right          = TRUE)
+
+fit <- PVCA(counts = exprs(esetTemp),
+            meta = pData(esetTemp)[, c("Timepoint",
+                                       "Treatment",
+                             "Monkey.ID",
+                             "Cell.population.sorted",
+                             "NumberCellsQ3",
+                             "TotalReadsQ3")],
+     threshold = 0.6,
+     inter = FALSE)
+
+plotDF <- data.frame(effect = as.vector(fit),
+                     label  = names(fit)) %>%
+  arrange(effect) %>%
+  mutate(label = factor(label, levels = label))
+ggplot(data = plotDF,
+       mapping = aes(x = label, y = effect)) +
+  geom_bar(stat = "identity") +
+  labs(x = NULL, y = "Explained effect") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+Subset and total number of reads are the main drivers of the raw gene-expression.  
+  
+Multidimensional scaling plot based on raw counts
+```{r mds-raw, fig.width=6, fig.height=4, fig.align="left"}
+rawMat <- counts(esetRaw)
+mat <- rawMat[rowSums(rawMat) > 0, ]
+mat <- log2(mat + 0.25)
+distMat <- parallelDist(t(mat), threads = detectCores() - 1)
+attributes(distMat)$Labels  <-  colnames(mat)
+fit <- cmdscale(distMat, k = 2, eig = TRUE)
+plotDF <- as.data.frame(fit$points)
+plotDF <- plotDF %>%
+    rownames_to_column() %>%
+    merge(y = rownames_to_column(pData(esetRaw)),
+          by = "rowname")
+ggplot(data    = plotDF,
+                   mapping = aes(x     = V1,
+                                 y     = V2,
+				 shape = Cell.population.sorted,
+                                 color = TotalReads)) +
+  geom_point(size = 4) +
+  labs(x = paste0("1st dimension (",
+                        round((fit$eig/sum(fit$eig))[1] * 100),
+                        "%)"),
+                    y = paste0("2nd dimension (",
+                        round((fit$eig/sum(fit$eig))[2] * 100),
+                        "%)")) +
+  scale_color_gradient(low = "lightgreen", high = "darkgreen") +
+  theme_bw()
+```
+Total number of reads counted per sample is indeed the main driver of gene-expression.  
+  
+Normalize (TMM) count data
+```{r normalize-counts, message=FALSE}
+# remove low counts samples
+esetTemp <- esetRaw[, esetRaw$TotalReads >= 2.1e6]
+dge <- DGEList(counts       = counts(esetTemp),
+               remove.zeros = TRUE)
+# remove low expressed genes
+flag <- filterByExpr(dge, group = esetRaw$Cell.population.sorted)
+dge <- dge[flag, , keep.lib.sizes = FALSE]
+dge <- calcNormFactors(object = dge, method = "TMM")
+normalizedCounts <- cpm(dge, normalized.lib.sizes = TRUE, log = TRUE)
+eset <-  newSeqExpressionSet(
+    counts           = dge$counts,
+    normalizedCounts = as.matrix(normalizedCounts),
+    featureData      = fData(esetTemp)[rownames(normalizedCounts), ],
+    phenoData        = pData(esetTemp))
+save(eset, file = file.path(workDir, "output/joana.eset.RData"))
+print(eset)
+``` 
+
+```{r load-counts, echo=FALSE}
+load(file = file.path(workDir, "output/joana.eset.RData"))
+```
+
+Principal variance component analysis (normalized)
+```{r pvca-norm, fig.height=4, fig.width=4, fig.align="left", warning=FALSE, message=FALSE}
+esetTemp <- ExpressionSet(assayData = normCounts(eset),
+                          phenoData = AnnotatedDataFrame(data = pData(eset)))
+esetTemp$TotalReadsQ3 <- cut(esetTemp$TotalReads,
+                             breaks         = quantile(esetTemp$TotalReads,
+                                                       probs = c(0,0.33, 0.66,1)),
+                         include.lowest = TRUE,
+                         right          = TRUE)
+fit <- PVCA(counts = exprs(esetTemp),
+            meta = pData(esetTemp)[, c("Timepoint",
+                                       "Treatment",
+                             "Monkey.ID",
+                             "Cell.population.sorted",
+                             "TotalReadsQ3")],
+                           threshold = 0.6,
+                           inter = FALSE)
+plotDF <- data.frame(effect = as.vector(fit),
+                     label  = names(fit)) %>%
+  arrange(effect) %>%
+  mutate(label = factor(label, levels = unique(label)))
+ggplot(data = plotDF,
+       mapping = aes(x = label, y = effect)) +
+  geom_bar(stat = "identity") +
+  labs(x = NULL, y = "Explained effect") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+After normalization (for total number of reads counted per samples), subset remain the main drivers of expression.  
+  
+Multidimensional scaling plot on normalized counts
+```{r mds-norm, fig.width=6, fig.height=4, fig.align="left"}
+# mds normalized/cpm counts
+mat <- normCounts(eset)
+distMat <- parallelDist(t(mat), threads = detectCores() - 1)
+attributes(distMat)$Labels  <- colnames(mat)
+fit <- cmdscale(distMat, k = 2, eig = TRUE)
+plotDF <- as.data.frame(fit$points) %>%
+  rownames_to_column() %>%
+  merge(y = rownames_to_column(pData(eset)),
+        by = "rowname")
+plotLabel <- round((fit$eig/sum(fit$eig)) * 100)
+plotLabel <- plotLabel[1:2]
+plotLabel <- paste0(c("1st dimension (", "2nd dimension ("),
+                    plotLabel,
+                    "%)")
+ggplot(data = plotDF,
+       mapping = aes(x = V1,
+                     y = V2,
+                     color = Cell.population.sorted,
+                     shape = Treatment)) +
+  geom_point(size = 4) +
+  labs(x = plotLabel[[1]],
+       y = plotLabel[[2]]) +
+  theme_bw() +
+  theme(legend.key = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+message("Potential mislabelled samples")
+filter(plotDF,
+(Cell.population.sorted %in% "B cells" &
+   V1 < 0) |
+  (Cell.population.sorted %in% "monocytes" &
+     V1 >	0)) %>%
+  print()
+```
+After normalization (for total number of reads counted per samples), subset remain the main driver of expression.  
+Potential swap was detected for animal HH7 between wk8 B cells and Monocytes.  
+  
+Jitter plot of genes coding for cell surface markers of B cells and Monocytes
+```{r jitter-sp, warning=FALSE, fig.width=4, fig.height=6, fig.align="left"}
+geneLS <- c("CD14", "MS4A1")
+plotDF <- counts(eset[fData(eset)$gene_name %in% geneLS, ]) %>%
+  as.data.frame() %>%
+  rownames_to_column() %>%
+  merge(y = select(fData(eset), gene_id, gene_name),
+	by.x = "rowname",
+	by.y = "gene_id") %>%
+  select(-rowname) %>%
+  gather(SampleID, count, -gene_name) %>%
+  merge(y = select(rownames_to_column(pData(eset)),
+		   rowname,
+		   Cell.population.sorted),
+	by.x = "SampleID",
+	by.y = "rowname") %>%
+  mutate(value = pmax(count, 0.1))
+# swaps
+swapLS <- c("HH7_wk8_Bcells", "HH7_wk8_monocytes")
+swapDF <- filter(plotDF, SampleID %in% swapLS)
+ggplot(data = filter(plotDF, count > 0),
+		  mapping = aes(x = Cell.population.sorted, y = count)) +
+  geom_boxplot(outlier.color = "transparent") +
+  geom_beeswarm(mapping = aes(color = Cell.population.sorted)) +
+  geom_text_repel(data    = swapDF,
+		              mapping = aes(label = SampleID)) +
+  scale_y_log10() +
+  facet_wrap(facet = ~gene_name, scale = "free", nrow = 3) +
+  theme_bw() +
+  theme(axis.text  = element_text(size = 5),
+	legend.pos = "none")
+```
+
+Principal variance component analysis per subset
+```{r pvca-norm-subset, fig.height=4, fig.width=4, fig.align="left", warning=FALSE, message=FALSE}
+plotDF <- NULL
+for (SUBSET in unique(eset$Cell.population.sorted)) {
+  esetTemp <- eset[, eset$Cell.population.sorted %in% SUBSET]
+  esetTemp <- ExpressionSet(assayData = normCounts(esetTemp),
+			    phenoData = AnnotatedDataFrame(data = pData(esetTemp)))
+  fit <- PVCA(counts = exprs(esetTemp),
+	      meta = pData(esetTemp)[, c("Timepoint",
+					 "Treatment",
+					 "Monkey.ID")],
+                           threshold = 0.6,
+                           inter = FALSE)
+  plotTemp <- data.frame(effect = as.vector(fit),
+			 label  = names(fit)) %>%
+    arrange(effect) %>%
+    mutate(label = factor(label, levels = unique(label)),
+	   Cell.population.sorted = SUBSET)
+  plotDF <- rbind(plotDF, plotTemp)
+}
+
+ggplot(data = plotDF,
+       mapping = aes(x = label, y = effect)) +
+  geom_bar(stat = "identity") +
+  labs(x = NULL, y = "Explained effect") +
+  theme_bw() +
+  facet_wrap(facets = ~Cell.population.sorted) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+Donor effect is observed in all subsets. 
+  
+Substract pre expression
+```{r baselined-expression, echo=FALSE}
+# merge replicate samples
+flagDF <- pData(eset) %>%
+  rownames_to_column() %>%
+  select(Monkey.ID, Timepoint, Cell.population.sorted, rowname) %>%
+  pivot_wider(names_from = Timepoint, values_from = rowname) %>%
+  pivot_longer(cols = c("D14", "wk8"),
+               names_to = "Timepoint",
+               values_to = "rowname") %>%
+  filter(!is.na(pre) & !is.na(rowname))
+esetBaselined <- eset[, flagDF$rowname]
+baselinedMat <- normCounts(eset)[, flagDF$rowname] -
+  normCounts(eset)[, flagDF$pre]
+normCounts(esetBaselined) <- baselinedMat
+save(esetBaselined, file = file.path(workDir, "output/joana.esetBaselined.RData"))
+print(esetBaselined)
+```
+
+```{r load-baselined-expression, echo=FALSE}
+load(file = file.path(workDir, "output/joana.esetBaselined.RData"))
+```
+
+Principal variance component analysis per subset (on baselined expression)
+```{r pvca-norm-subset-baselined, fig.height=4, fig.width=4, fig.align="left", warning=FALSE, message=FALSE}
+plotDF <- NULL
+for (SUBSET in unique(esetBaselined$Cell.population.sorted)) {
+  esetTemp <- esetBaselined[, esetBaselined$Cell.population.sorted %in% SUBSET]
+  esetTemp <- ExpressionSet(assayData = normCounts(esetTemp),
+                            phenoData = AnnotatedDataFrame(data = pData(esetTemp)))
+  fit <- PVCA(counts = exprs(esetTemp),
+              meta = pData(esetTemp)[, c("Timepoint",
+                                         "Treatment",
+                                         "Monkey.ID")],
+                           threshold = 0.6,
+                           inter = FALSE)
+  plotTemp <- data.frame(effect = as.vector(fit),
+                         label  = names(fit)) %>%
+    arrange(effect) %>%
+    mutate(label = factor(label, levels = unique(label)),
+           Cell.population.sorted = SUBSET)
+  plotDF <- rbind(plotDF, plotTemp)
+}
+
+ggplot(data = plotDF,
+       mapping = aes(x = label, y = effect)) +
+  geom_bar(stat = "identity") +
+  labs(x = NULL, y = "Explained effect") +
+  theme_bw() +
+  facet_wrap(facets = ~Cell.population.sorted) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+```
+Treatment effect is better observed on pre-post expression. 
+
+Multidimensional scalling plot on baselined counts by subsets
+```{r mds-baselined-subset, fig.width=8, fig.height=4.75, fig.align="left"}
+plotDF <- NULL
+for (SUBSET in unique(esetBaselined$Cell.population.sorted)) {
+  # mds normalized/cpm counts
+  esetTemp <- esetBaselined[, esetBaselined$Cell.population.sorted %in% SUBSET]
+
+  mat <- normCounts(esetTemp)
+  distMat <- parallelDist(t(mat), threads = detectCores() - 1)
+  attributes(distMat)$Labels  <- colnames(mat)
+  fit <- cmdscale(distMat, k = 2, eig = TRUE)
+  as.data.frame(fit$points) %>%
+    rownames_to_column() %>%
+    merge(y = rownames_to_column(pData(eset)),
+          by = "rowname") %>%
+    rbind(plotDF, .) -> plotDF
+}
+
+ggplot(data = plotDF,
+                   mapping = aes(x = V1,
+                                 y = V2,
+                                 color = Timepoint,
+                                 shape = Treatment)) +
+  geom_point(size = 4) +
+  facet_wrap(facets = ~Cell.population.sorted, scale = "free") +
+  theme_bw() +
+  theme(legend.key = element_blank(),
+        plot.title = element_text(hjust = 0.5))
+```
+
+Differential expression between timepoints (paired)
+```{r diff-expression}
+message("top 50 genes based on p-values (all FDR<=5%")
+fits <- list()
+# vaccine effect
+for (SUBSET in unique(eset$Cell.population.sorted)) {
+  esetTemp <- eset[, eset$Cell.population.sorted %in% SUBSET]
+  dge <- DGEList(counts  = counts(esetTemp),
+                 samples = pData(esetTemp),
+                 genes   = fData(esetTemp))
+  goi <- interaction(gsub(pattern     = " .+",
+                          replacement = "",
+                          esetTemp$Treatment),
+                     esetTemp$Timepoint,
+                     drop = TRUE)
+  donor <- esetTemp$Monkey.ID
+  designMat <- model.matrix(~0+goi) 
+  rownames(designMat) <- sampleNames(esetTemp)
+  colnames(designMat) <- gsub(pattern     = "goi",
+                              replacement = "",
+                              colnames(designMat))
+  attr(designMat, "assign") <- attr(designMat, "contrasts") <- NULL
+  v <- voom(counts = dge, design = designMat)
+  corfit <- duplicateCorrelation(v$E,
+                                 design = designMat,
+                                 block  = donor)
+  fit <- lmFit(v,
+               design      = designMat,
+               block       = donor,
+               correlation = corfit$consensus)
+  contrastLS <- grep(pattern = "pre", colnames(fit), value = TRUE, invert = TRUE) %>%
+    paste0(., "-", gsub(pattern = "\\..+", replacement = ".pre", .))
+  contrastMat <- makeContrasts(contrasts = contrastLS, levels = fit$design)
+  fit2 <- contrasts.fit(fit = fit, contrasts = contrastMat)
+  fit2 <- eBayes(fit = fit2)
+  fits[[paste0(SUBSET, "_vax")]] <- list(fit = fit, fit2 = fit2)
+}
+# for NK and Monocytes of DEL at wk8 compare low VL vs max VL
+for (SUBSET in setdiff(eset$Cell.population.sorted, "cDCs")) {
+  esetTemp <- eset[, eset$Cell.population.sorted %in% SUBSET &
+                   eset$Treatment != "Untreated"]
+  dge <- DGEList(counts  = counts(esetTemp),
+                 samples = pData(esetTemp),
+                 genes   = fData(esetTemp))
+  goi <- ifelse(test = esetTemp$max.vl >= 1e04,
+		yes  = "highMaxVL",
+		no   = "lowMaxVL") %>%
+      interaction(gsub(pattern = " .+",
+                       replacement = "",
+                       esetTemp$Treatment),
+                  esetTemp$Timepoint,
+                  .)
+  designMat <- model.matrix(~0+goi) 
+  rownames(designMat) <- sampleNames(esetTemp)
+  colnames(designMat) <- gsub(pattern     = "goi",
+                              replacement = "",
+                              colnames(designMat))
+  attr(designMat, "assign") <- attr(designMat, "contrasts") <- NULL
+  v <- voom(counts = dge, design = designMat)
+  fit <- lmFit(v, design      = designMat)
+  contrastLS <- grep(pattern = "highMaxVL", colnames(fit), value = TRUE) %>%
+      paste0(.,
+             "-",
+             gsub(pattern = "high", replacement = "low", .))
+
+  contrastMat <- makeContrasts(contrasts = contrastLS,
+			       levels = fit$design)
+  fit2 <- contrasts.fit(fit = fit, contrasts = contrastMat)
+  fit2 <- eBayes(fit = fit2)
+  fits[[paste0(SUBSET, "_maxVL")]] <- list(fit = fit, fit2 = fit2)  
+}
+
+# for NK and Monocytes of DEL at wk8 compare low VL vs max VL
+for (SUBSET in setdiff(esetBaselined$Cell.population.sorted, "cDCs")) {
+  esetTemp <- esetBaselined[, esetBaselined$Cell.population.sorted %in% SUBSET &
+                   esetBaselined$Treatment %in% "DEL bNAb Tx"]
+  goi <- ifelse(test = esetTemp$max.vl >= 1e04,
+		yes  = "highMaxVL",
+		no   = "lowMaxVL") %>%
+      interaction(gsub(pattern = " .+",
+                       replacement = "",
+                       esetTemp$Treatment),
+                  esetTemp$Timepoint,
+                  .)
+  designMat <- model.matrix(~0+goi) 
+  rownames(designMat) <- sampleNames(esetTemp)
+  colnames(designMat) <- gsub(pattern     = "goi",
+                              replacement = "",
+                              colnames(designMat))
+  attr(designMat, "assign") <- attr(designMat, "contrasts") <- NULL
+  fit <- lmFit(normCounts(esetTemp), design      = designMat)
+  contrastLS <- grep(pattern = "highMaxVL", colnames(fit), value = TRUE) %>%
+      paste0(.,
+             "-",
+             gsub(pattern = "high", replacement = "low", .))
+
+  contrastMat <- makeContrasts(contrasts = contrastLS,
+			       levels = fit$design)
+  fit2 <- contrasts.fit(fit = fit, contrasts = contrastMat)
+  fit2 <- eBayes(fit = fit2)
+  fits[[paste0(SUBSET, "_baselined_maxVL")]] <- list(fit = fit, fit2 = fit2)  
+}
+
+# save fits
+save(fits, file = file.path(workDir, "output/joana.fits.RData"))
+```
+
+```{r load-diff-expression, echo=FALSE}
+load(file = file.path(workDir, "output/joana.fits.RData"))
+```
+
+```{r print-nb-deg}
+# print number of genes differently expressed
+degNbDF <- NULL 
+for (modelName in names(fits)) {
+  fit2 <- fits[[modelName]][["fit2"]]
+  for (coefName in colnames(fit2)) {
+    top <- topTable(fit = fit2, coef = coefName, number = Inf) %>%
+      as.data.frame()
+    if (!("gene_id" %in% names(top))) {
+      top <- top %>%
+      rownames_to_column(var = "gene_id") %>%
+      merge(y = select(fData(eset), gene_id, gene_name, gene_biotype), by = "gene_id")
+    }
+    top %>%
+      filter(gene_biotype %in% "protein_coding") %>%
+      group_by(sign(logFC)) %>%
+      summarize(p     = sum(P.Value <= 0.05),
+                adj.p = sum(adj.P.Val <= 0.05)) %>%
+      mutate(modelName = modelName,
+             contrast = coefName) %>%
+      rbind(degNbDF) -> degNbDF
+  }
+}
+
+degNbDF %>%
+  pivot_longer(cols = c(-modelName, -contrast, -`sign(logFC)`),
+               names_to = "cname",
+               values_to = "n") %>%
+  mutate(`sign(logFC)` = c("-1" = "DN", "1" = "UP")[as.character(`sign(logFC)`)],
+         cname         = paste0(cname, `sign(logFC)`)) %>%
+  select(-`sign(logFC)`) %>%
+  pivot_wider(names_from = cname, values_from = n) %>%
+  mutate(p = paste0(pUP, "/", pDN),
+         adj.p = paste0(adj.pUP, "/", adj.pDN)) %>%
+  select(modelName, contrast, p, adj.p) %>%
+  as.data.frame() %>%
+  kable()
+```
+
+Heatmaps with DEGs
+```{r heatmap-deg-top50, fig.align="left", fig.height=8.5, fig.width=6}
+for (modelName in names(fits)) {
+  fit2 <- fits[[modelName]][["fit2"]]
+  for (coefName in colnames(fit2)) {
+    top <- topTable(fit = fit2, coef = coefName, number = Inf) %>%
+      as.data.frame()
+    if (!("gene_id" %in% names(top))) {
+      top <- top %>%
+      rownames_to_column(var = "gene_id") %>%
+      merge(y = select(fData(eset), gene_id, gene_name, gene_biotype), by = "gene_id")
+    }
+    top <- top %>%
+      filter(!is.na(gene_name) &
+	       gene_biotype %in% "protein_coding" &
+	       adj.P.Val <= 0.05)
+    if (nrow(top) > 0) {
+      top <- top %>%
+        top_n(50, wt = abs(t)) %>%
+        arrange(desc(logFC))
+      sampleLS <- which(fit2$contrast[, coefName] != 0) %>%
+        fit2$design[, .] %>%
+        as.data.frame() %>%
+        rownames_to_column() %>%
+        gather(group, value, -rowname) %>%
+        group_by(rowname) %>%
+        summarize(value = sum(value)) %>%
+        filter(value > 0) %>%
+        .$rowname
+      mat <- normCounts(eset)[top$gene_id, sampleLS, drop = FALSE] %>%
+        t() %>%
+        scale() %>%
+        t()
+      mat <- mat[complete.cases(mat), , drop = FALSE]
+      colorLS <- colorRampPalette(colors = c("blue", "white", "red"))(n = 100)
+      breakLS <- c(-1 * max(abs(mat), na.rm = TRUE),
+                   seq(from = -1 * min(abs(range(mat, na.rm = TRUE))),
+                       to   = min(abs(range(mat, na.rm = TRUE))),
+                       length.out = 99),
+                   max(abs(mat), na.rm = TRUE))
+      matAnnot <- pData(eset) %>%
+        rownames_to_column() %>%
+        mutate(log10.max.vl = log10(max.vl)) %>%
+        select(rowname, Timepoint, Treatment, Cell.population.sorted,
+               log10.max.vl, time2max.vl, auc.VRC07.523.LS, auc.PGT121) %>%
+        column_to_rownames()
+      matAnnot <- matAnnot[colnames(mat), ]
+      matAnnot <- matAnnot[, colMeans(is.na(matAnnot)) < 1]
+      ha <- HeatmapAnnotation(df = matAnnot)
+      heat <- Heatmap(matrix         = mat,
+                      width          = unit(0.5, units = "npc"),
+                      height         = unit(0.1+0.6*(nrow(mat)/50), units = "npc"),
+                      top_annotation = ha,
+                      name           = "zscore",
+                      column_title   = paste0(modelName, ": ", coefName),
+                      row_names_gp   = gpar(fontsize = 7),
+                      column_labels  = pData(eset)[colnames(mat), "Monkey.ID"],
+		      row_labels     = top$gene_name)
+      print(heat)
+    }
+  }
+}
+``` 
+
+Heatmaps with all DEGs across time by subset
+```{r deg-heat-f, fig.align="left", fig.height=8.5, fig.width=6}
+message("FDR cutoff of 5%") 
+for (modelName in grep(pattern = "vax", names(fits), value = TRUE)) {
+  fit2 <- fits[[modelName]][["fit2"]]
+  top <- topTableF(fit2, number = Inf, p.value = 0.05) %>%
+    as.data.frame()
+  if (!("gene_id" %in% names(top))) {
+      top <- top %>%
+      rownames_to_column(var = "gene_id") %>%
+      merge(y = select(fData(eset), gene_id, gene_name, gene_biotype), by = "gene_id")
+  }
+  top <- top %>%
+    filter(gene_biotype %in% "protein_coding")
+  if (nrow(top) > 0) {
+    top <- top %>%
+      arrange(desc(WT.D14.WT.pre)) %>%
+      mutate(gene_name = ifelse(test = is.na(gene_name),
+				yes  = gene_id,
+				no   = gene_name))
+    sampleLS <- rownames(fit2$design)
+    sampleLS <- intersect(sampleLS, sampleNames(esetBaselined))
+    mat <- normCounts(esetBaselined)[top$gene_id, sampleLS, drop = FALSE]
+      
+    mat <- mat[complete.cases(mat), ]
+    matAnnot <- pData(eset) %>%
+      rownames_to_column() %>%
+      mutate(log10.max.vl = log10(max.vl)) %>%
+      select(rowname, Timepoint, Treatment, Cell.population.sorted,
+	     log10.max.vl, time2max.vl, auc.VRC07.523.LS, auc.PGT121) %>%
+      column_to_rownames()
+    matAnnot <- matAnnot[colnames(mat), ]
+    ha <- HeatmapAnnotation(df = matAnnot)
+    splitCols <- pData(eset)[colnames(mat),
+			     c("Timepoint", "Treatment")] %>%
+      apply(MARGIN = 1, FUN = paste, collapse = ".") 
+    heat <- Heatmap(matrix         = mat,
+		    width          = unit(0.5, units = "npc"),
+		    height         = unit(0.75, units = "npc"),
+		    top_annotation = ha,
+		    name           = "log2FC",
+		    column_title   = modelName,
+		    show_row_names = FALSE,
+		    column_labels  = pData(eset)[colnames(mat),
+						 "Monkey.ID"],
+		    column_split   = splitCols)
+    print(heat)
+  }
+}
+```
+
+```{r session-info}
+sessionInfo()
+```
+
