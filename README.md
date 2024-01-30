@@ -6,13 +6,14 @@ R code to reproduce the transcriptomic analysis of the Dias/Koup project
 
 ### Fig. 6A-B  
 ![Fig. 6AB](figure/fig6ab.png)  
-Fig. 6A-B: [R code [MD]](code/)
+Fig. 6A-B: [R code [MD]](code/20230203_Joana.fig6ab.md)  
 
 ## Supplemental material
 
 ### a. Set 1 RNA-Seq analysis:
 code:  
 - preprocessing: [[MD]](code/20200511_Joana.mrnaseq_preproc.md)
+- genesets enrichment analysis: [[MD]](code/20200513_Joana.geneset_analysis.md)
 
 input:  
 - non-normalized (raw) gene counts: [[CSV]](input/joana.genecounts.csv)  
@@ -25,4 +26,5 @@ output:
 - raw SeqExpressionSet: [[RDA]](output/joana.esetRaw.RData)  
 - normalized SeqExpressionSet: [[RDA]](output/joana.eset.RData)  
 - baseline-substracted SeqExpressionSet: [[RDA]](output/joana.esetBaselined.RData)  
-- DGEGLM list: [[RDA]](output/joana.fits.RData)  
+- DGEGLM list: [[RDA]](output/joana.fits.RData)
+- GSEA output (see data release)

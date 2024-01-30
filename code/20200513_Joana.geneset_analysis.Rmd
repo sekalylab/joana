@@ -1,0 +1,222 @@
+---
+title: "Dias/Koup genesets analysis (set 1)"
+author: "Slim Fourati"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+loading require packages
+```{r loading-packages, echo=FALSE}
+suppressPackageStartupMessages(library(package = "knitr"))
+suppressPackageStartupMessages(library(package = "edgeR"))
+suppressPackageStartupMessages(library(package = "tidyverse"))
+```
+
+```{r global-variables, echo=FALSE}
+opts_chunk$set(echo = TRUE, fig.path = "../figure/")
+options(readr.show_col_types   = FALSE,
+        dplyr.summarise.inform = FALSE)
+workDir <- dirname(getwd())
+```
+
+Perform pathway analysis using GSEA
+```{r read-dgeglm}
+# read DGEGLM list
+load(file = file.path(workDir, "output/joana.fits.RData"))
+```
+
+```{r dowload-gsea-gmt}
+# download GSEA JAR file and hallmark GMT
+# download GSEA JAR application from the BROAD web site
+unzip(zipfile = file.path(workDir, "utils/GSEA_4.0.3.zip"), exdir = workDir)
+gseaCli <- file.path(workDir, "GSEA_4.0.3/gsea-cli.sh")
+# downaload hallmark in GMT file from the MSigDB web site
+gmtFile <- file.path(workDir, "utils/msigdb.v7.1.symbols.gmt")
+dir.create(path = file.path(workDir, "advanced"))
+message("geneset databases:")
+print(basename(gmtFile))
+```
+
+```{r create-rnk, eval=FALSE}
+# create ranked list file
+# extract DGEGLM object for the vax route comparison
+rnkList <- contrastLS <- NULL
+for (modelName in names(fits)) {
+  fit2 <- fits[[modelName]]$fit2
+  # for each contrast of the DGEGLM create a ranked list file (RNK)
+  contrastLS <- colnames(fit2)
+  rnkLS <- lapply(contrastLS, FUN = function(contrast) {
+    # sort by t
+    top <- topTable(fit = fit2, coef = contrast, number = Inf) %>%
+      as.data.frame() %>%
+      filter(!is.na(gene_name)) %>%
+      mutate(score = t) %>%
+      # remove ambiguous mapping (gene_ids annotated to same gene_name)
+      # select the gene_id expressed in average the most in samples
+      arrange(desc(abs(t))) %>%
+      filter(!duplicated(gene_name)) %>%
+      arrange(desc(score)) %>%
+      select(gene_name, score)
+    rnkFile <- paste0("gsea_", modelName, "_", contrast,  ".rnk")
+    rnkFile <- make.names(rnkFile)
+    rnkFile <- file.path(workDir, "advanced", rnkFile)
+    write(paste(c("#", colnames(top)), collapse = " "), file = rnkFile)
+    write_tsv(top,
+              path      = rnkFile,
+              append    = TRUE,
+              col_names = FALSE)
+    return(value = c(modelName = modelName,
+                     contrast  = contrast,
+                     rnk       = rnkFile))
+  })
+  rnkLS <- do.call(what = rbind, args = rnkLS)
+  rnkList <- rbind(rnkList, rnkLS)
+}
+rnkList <- as.data.frame(rnkList)
+``` 
+
+```{r run-gsea, eval=FALSE}
+# run preranked GSEA
+# result will be written in directory called advanced
+gseaDir <- file.path(workDir, "advanced")
+# generate GSEA command line call
+gseaIndex  <- lapply(rnkList$rnk, FUN = function(gseaRnk) {
+  logFileName <- gsub(pattern = "rnk$", replacement = "log", gseaRnk)
+  gseaRpt <- paste(gsub(pattern     = "rnk",
+                          replacement = "",
+                          basename(gseaRnk)),
+                     gsub(pattern     = "^([^\\.]+).+$",
+                          replacement = "\\1",
+                          basename(gmtFile)),
+                     sep = ".")
+  gseaRpt <- substring(gseaRpt, first = 1, last = 50)
+    gseaCall <- paste("bash",
+                      gseaCli,
+                      "GSEAPreranked",
+                      "-gmx",
+                      gmtFile,
+                      "-collapse No_Collapse",
+                      "-mode Max_probe",
+                      "-norm None",
+                      "-nperm 1000",
+                      "-rnk",
+                      gseaRnk,
+                      "-scoring_scheme weighted",
+                      "-rpt_label",
+                      gseaRpt,
+                      "-create_svgs false",
+                      "-include_only_symbols true",
+                      "-make_sets true",
+                      "-plot_top_x 1",
+                      "-rnd_seed 111",
+                      "-set_max 2000",
+                      "-set_min 15",
+                      "-zip_report false",
+                      "-out",
+                      gseaDir,
+                      ">",
+                      logFileName)
+  
+    gseaIntern <- system(command       = gseaCall,
+                        intern        = TRUE,
+                       ignore.stderr = TRUE)
+  return(value = c(rnk = gseaRnk, rpt = file.path(gseaDir, gseaRpt)))
+})
+gseaIndex <- do.call(what = rbind, args = gseaIndex)
+
+gseaIndex <- merge(rnkList, gseaIndex, by = "rnk")
+```
+
+```{r append-advanced-directory, eval=FALSE}
+# remove previous gsea run from the advanced directory
+dirLS <- list.dirs(path = file.path(workDir, "advanced"), recursive = FALSE)
+dirLS <- cbind(directory = dirLS,
+               rpt       = gsub(pattern = ".GseaPreranked.+$",
+                   replacement = "",
+                   dirLS))
+gseaIndex <- merge(gseaIndex, dirLS, by = "rpt")
+```
+
+```{r read-gsea-output, warning=FALSE, eval=FALSE}
+# read gsea output directories
+gmtDir <- file.path(workDir, "utils")
+gseaOutput <- apply(gseaIndex, MARGIN = 1, FUN = function(gseaRun) {
+  print(gseaRun[c("modelName", "contrast")])
+  gseaDir <- gseaRun[["directory"]]
+  # read rpt file in gsea output directory
+  rptFile <- list.files(path = gseaDir, pattern = "rpt", full.names = TRUE)
+  rpt <- read.table(file = rptFile, sep = "\t", fill = TRUE, header = FALSE) %>%
+    `colnames<-`(c("type", "name", "value"))
+  # read gmt file
+  gmxFile <- rpt$value[rpt$name %in% "gmx"]
+  gmxFile <- file.path(gmtDir, basename(gmxFile))
+  cNames <- count_fields(file = gmxFile, tokenizer = tokenizer_tsv()) %>%
+    max() %>%
+    seq(from = 1) %>%
+    as.character()
+  gmx <- read_tsv(file = gmxFile, col_names = cNames)
+  # remove geneset name and description column
+  gsNames <- toupper(gmx$"1")
+  gmx <- apply(select(gmx, -(1:2)), MARGIN = 1, FUN = function(x) {
+    return(value = setdiff(unname(x), NA))
+  })
+  names(gmx) <- gsNames
+  # read result files
+  resFile <- grep(pattern = "gsea_report.*xls",
+                  dir(path = gseaDir, full.names = TRUE),
+                  value   = TRUE)
+  resOut <- lapply(resFile, FUN = function(fileName) {
+    resTable <- read_tsv(file = fileName)
+  })
+  resOut <- do.call(what = rbind, args = resOut)
+  # extract leading edge genes
+  rnk <- read_tsv(file      = gseaRun[["rnk"]],
+                  skip      = 1,
+                  col_names = c("SYMBOL", "score")) %>%
+         arrange(desc(score))
+  leGenes <- group_by(resOut, NAME) %>%
+             do(LEADING_EDGE = ifelse(test = sign(.$NES) %in% 1,
+                    yes = paste(intersect(rnk$SYMBOL[seq(from = 1,
+                        to = .$"RANK AT MAX" + 1)],
+                        gmx[[.$NAME]]), collapse = ","),
+                    no  = paste(intersect(rnk$SYMBOL[seq(from = nrow(rnk) -
+                        .$"RANK AT MAX",
+                        to = nrow(rnk))],
+                        gmx[[.$NAME]]), collapse = ","))) %>%
+             ungroup() %>%
+             mutate(LEADING_EDGE = unlist(LEADING_EDGE))
+  resOut <- merge(resOut, leGenes, by = "NAME")
+  # append directory name
+  resOut <- mutate(resOut, directory = gseaDir)
+  return(value = resOut)
+})
+gseaOutput <- do.call(what = rbind, args = gseaOutput)
+gseaOutput <- merge(gseaOutput, gseaIndex, by = "directory")
+
+save(gseaOutput, file = file.path(workDir, "output/joana.gseaOutput.RData"))
+```
+
+```{r load-gseaoutput, echo=FALSE}
+load(file = file.path(workDir, "output/joana.gseaOutput.RData"))
+``` 
+
+```{r delete-temporary-directory}
+# delete temporary directory create during gsea run
+flag <- unlink(file.path(workDir, "GSEA_4.0.3"), recursive = TRUE)
+flag <- unlink(file.path(workDir, "advanced"))
+```
+
+```{r nb-gs}
+message("number of genesets significant for each comparisons:")
+gseaOutput %>%
+  filter(`FDR q-val` <= 0.05) %>%
+  group_by(modelName, contrast, sign(NES)) %>%
+  summarize(n = n()) %>%
+  pivot_wider(names_from = `sign(NES)`, values_from = n) %>%
+  as.data.frame() %>%
+  kable()
+```
+print session info
+```{r session-info}
+sessionInfo()
+```

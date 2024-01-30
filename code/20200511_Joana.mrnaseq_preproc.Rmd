@@ -676,6 +676,12 @@ ggplot(data = filter(plotDF, count > 0),
 	legend.pos = "none")
 ```
 
+```{r correct-swap, echo=FALSE, eval=FALSE}
+sampleNames(eset)[match(swapLS, table = sampleNames(eset))] <- rev(swapLS)
+pData(eset)[swapLS, "Cell.population.sorted"] <- rev(pData(eset)[swapLS, "Cell.population.sorted"])
+save(eset, file = file.path(workDir, "output/joana.eset.RData"))
+```
+
 Principal variance component analysis per subset
 ```{r pvca-norm-subset, fig.height=4, fig.width=4, fig.align="left", warning=FALSE, message=FALSE}
 plotDF <- NULL
