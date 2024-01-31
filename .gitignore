@@ -1,0 +1,4 @@
+.DS_Store
+input/joana.genes.gtf
+output/joana.gseaOutput.RData
+output/joana2.fsgsea.RData

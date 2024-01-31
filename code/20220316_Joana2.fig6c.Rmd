@@ -1,0 +1,220 @@
+---
+title: Joana2 peak analysis
+author: Slim Fourati
+date: "`r Sys.Date()`"
+output: github_document  
+---
+
+```{r load-packages}
+suppressPackageStartupMessages(library(package = "knitr"))
+suppressPackageStartupMessages(library(package = "ComplexHeatmap"))
+suppressPackageStartupMessages(library(package = "impute"))
+suppressPackageStartupMessages(library(package = "limma"))
+suppressPackageStartupMessages(library(package = "EDASeq"))
+suppressPackageStartupMessages(library(package = "fgsea"))
+suppressPackageStartupMessages(library(package = "kableExtra"))
+suppressPackageStartupMessages(library(package = "tidyverse"))
+```
+
+```{r session-options}
+opts_chunk$set(echo = TRUE, fig.path = "../figure/")
+options(readr.show_col_types   = FALSE,
+        dplyr.summarise.inform = FALSE)
+workDir <- dirname(getwd())
+```
+
+### Differential expression between DEL.wk8, UnTx.D14 (DEL.D14 used as reference group)
+```{r load-eset}
+load(file = file.path(workDir, "output/joana2.esetBaselined.RData"))
+```
+
+```{r add-fits}
+fits <- list()
+
+# compare untreated wk2 Untr to wk8 DEL
+for (SUBSET in unique(esetBaselined$Cell.population.sorted.1)) {
+  esetTemp <- esetBaselined[, esetBaselined$Cell.population.sorted.1 %in% SUBSET &
+                              ((esetBaselined$NHP.group %in% "UnTx" & 
+                                esetBaselined$Timepoint %in% "D14") |
+                               (esetBaselined$NHP.group %in% "DEL bNAb Tx"))]
+  goi <- interaction(gsub(pattern     = " .+",
+                          replacement = "",
+                          esetTemp$NHP.group),
+                     esetTemp$Timepoint,
+                     drop = TRUE)
+  designMat <- model.matrix(~0+goi) 
+  rownames(designMat) <- sampleNames(esetTemp)
+  colnames(designMat) <- gsub(pattern     = "goi",
+                              replacement = "",
+                              colnames(designMat))
+  attr(designMat, "assign") <- attr(designMat, "contrasts") <- NULL
+  dge <- ExpressionSet(assayData   = normCounts(esetTemp),
+                       phenoData   = AnnotatedDataFrame(pData(esetTemp)),
+                       featureData = AnnotatedDataFrame(fData(esetTemp)))
+  fit <- lmFit(dge,
+               design      = designMat)
+  contrastMat <- makeContrasts(contrasts = c("DEL.wk8-UnTx.D14",
+                                             "DEL.wk8-DEL.D14",
+                                             "UnTx.D14-DEL.D14"), 
+                               levels = fit$design)
+  fit2 <- contrasts.fit(fit = fit, contrasts = contrastMat)
+  fit2 <- eBayes(fit = fit2)
+  fits[[paste0(SUBSET, "_peak")]] <- list(fit = fit, fit2 = fit2)
+}
+
+# compare WT wk2 to wk2 DEL
+for (SUBSET in unique(esetBaselined$Cell.population.sorted.1)) {
+  esetTemp <- esetBaselined[, esetBaselined$Cell.population.sorted.1 %in% SUBSET &
+                              esetBaselined$Timepoint %in% "D14"]
+  goi <- interaction(gsub(pattern     = " .+",
+                          replacement = "",
+                          esetTemp$NHP.group),
+                     esetTemp$Timepoint,
+                     drop = TRUE)
+  designMat <- model.matrix(~0 + goi) 
+  rownames(designMat) <- sampleNames(esetTemp)
+  colnames(designMat) <- gsub(pattern     = "goi",
+                              replacement = "",
+                              colnames(designMat))
+  attr(designMat, "assign") <- attr(designMat, "contrasts") <- NULL
+  dge <- ExpressionSet(assayData     = normCounts(esetTemp),
+                       phenoData     = AnnotatedDataFrame(pData(esetTemp)),
+                       featureData   = AnnotatedDataFrame(fData(esetTemp)))
+  fit <- lmFit(dge,
+               design      = designMat)
+  contrastMat <- makeContrasts(contrasts = c("DEL.D14-UnTx.D14",
+                                             "DEL.D14-WT.D14",
+                                             "WT.D14-UnTx.D14"), 
+                               levels    = fit$design)
+  fit2 <- contrasts.fit(fit = fit, contrasts = contrastMat)
+  fit2 <- eBayes(fit = fit2)
+  fits[[paste0(SUBSET, "_prepeak")]] <- list(fit = fit, fit2 = fit2)
+}
+```
+
+```{r print-deg}
+topDEG <- NULL
+for (modelName in grep(pattern = "peak", names(fits), value = TRUE)) {
+  fit2 <- fits[[modelName]][["fit2"]]
+  for (coefName in colnames(fit2)) {
+    topTable(fits[[modelName]][["fit2"]],
+             coef   = coefName,
+             number = Inf) %>%
+      group_by(sign(t)) %>%
+      summarize(p = sum(P.Value <= 0.05),
+                adjp = sum(adj.P.Val <= 0.05)) %>%
+      ungroup() %>%
+      mutate(modelName = modelName,
+             contrast = coefName) %>%
+      pivot_wider(names_from = `sign(t)`,
+                  values_from = c(p, adjp)) %>%
+      mutate(`p (UP/DN)` = paste0(`p_1`, "/", `p_-1`),
+             `adjp (UP/DN)` = paste0(`adjp_1`, "/", `adjp_-1`)) %>%
+      select(modelName, contrast, `p (UP/DN)`, `adjp (UP/DN)`) %>%
+      rbind(topDEG, .) ->topDEG
+   
+  }
+}
+topDEG %>%
+  filter(grepl(pattern = "_peak", modelName)) %>%
+  kable(format = "pipe")
+```
+No single genes was different between peak VL in UnTx and DEL. However, no DEG was also identified with the reference group DEL.D14.
+
+### Run geneset enrichment analysis
+```{r fgsea, eval=FALSE}
+pathways <- gmtPathways(gmt.file = file.path("/Users/sfourat/Desktop/Projects/Utils/GSEA",
+                                             "msigdb.v7.4.symbols.gmt"))
+
+fgseaRes <- NULL
+for (modelName in names(fits)) {
+  fit2 <- fits[[modelName]][["fit2"]]
+  for (coefName in setdiff(colnames(fit2), "(Intercept)")) {
+    # print(coefName)
+    top <- topTable(fit = fit2, coef = coefName, number = Inf)
+    ranks <- setNames(top$t, top$gene_name)
+    fgseaResTemp <- fgsea(pathways, ranks, minSize = 15, maxSize = 500) %>%
+      mutate(modelName = modelName,
+             contrast  = coefName)
+    fgseaRes <- rbind(fgseaRes, fgseaResTemp)
+  }
+}
+filter(fgseaRes, grepl(pattern = "INTERFERON$", pathway, ignore.case = TRUE) &
+				`pval` <= 0.05 & grepl("^fCD8", modelName)) %>%
+  select(modelName, contrast, pathway, NES, pval, padj) %>%
+  kable() %>%
+  kable_styling(font_size = 6)
+
+save(fgseaRes, file = file.path(workDir, "data/joana2.fsgsea.RData"))
+```
+
+```{r load-fgsea, echo=FALSE}
+load(file = file.path(workDir, "output/joana2.fsgsea.RData"))
+```
+
+```{r print-nb-sig}
+message("number of MSigDB (v7.4) significantly enriched between vax groups (FDR q-val <= 0.05):")
+filter(fgseaRes, grepl(pattern = "_peak", modelName) & padj <= 0.05) %>%
+  group_by(modelName, contrast, sign(NES)) %>%
+  summarize(n = n()) %>%
+  mutate(modelName= gsub(pattern = "_untx", replacement = "", modelName)) %>%
+  pivot_wider(names_from = `sign(NES)`, values_from = n) %>%
+  mutate("# UP/DN"  = paste0(`1`, "/", `-1`)) %>%
+  select(modelName, contrast, `# UP/DN`) %>%
+  kable(format = "pipe")
+```
+There is a large number of genesets enriched among DEGs between the 
+treatment groups. Let's focus on hallmark genesets to determine if those changes
+are similar across subset or subsets specific
+
+### Hallmark NES heatmap
+plotting only significant enrichment (nominal p<=0.05)
+```{r  fig6c, warning=FALSE, fig.align="left"}
+nesMatSig <- filter(fgseaRes, 
+                    grepl(pattern = "_peak", modelName) &
+                    grepl(pattern = "^HALLMARK", pathway) &
+                    pval <= 0.05) %>%
+  mutate(cname = paste0(modelName, "/", contrast)) %>%
+  select(NES, cname, pathway) %>%
+  pivot_wider(names_from = cname, values_from = NES) %>%
+  as.data.frame() %>%
+  column_to_rownames(var = "pathway") %>%
+  as.matrix()
+distImpute <- function(x) {
+  dist(x) %>%
+    as.matrix() %>%
+    impute.knn(colmax= 1) %>%
+    .$data %>%
+    as.dist()
+}
+colAnnot <- colnames(nesMatSig) %>%
+  strsplit(split = "/") %>%
+  do.call(what = rbind) %>%
+  as.data.frame() %>%
+  mutate(cname = paste0(V1, "/", V2)) %>%
+  rename(Subset   = V1,
+         contrast = V2) %>%
+  mutate(Subset = gsub(pattern = "_peak", replacement = "", Subset)) %>%
+  column_to_rownames(var = "cname")
+colAnnot <- colAnnot[colnames(nesMatSig), ]
+ha <- HeatmapAnnotation(df  = colAnnot,
+                        col = list(contrast = c("DEL.wk8-DEL.D14"  = "blue",
+                                                "DEL.wk8-UnTx.D14" = "green",
+                                                "UnTx.D14-DEL.D14" = "red")))
+Heatmap(matrix                      = nesMatSig,
+        top_annotation              = ha,
+        show_column_names           = FALSE,
+        row_names_gp                = gpar(fontsize = 6),
+        name                        = "NES",
+        clustering_distance_rows    = distImpute,
+        clustering_distance_columns = distImpute,
+        column_split                = colAnnot$contrast,
+        column_title                = NULL)
+```
+Most changes are consistent between subsets. The main difference between DEL.wk8 and UnTx.D14 are linked to interferon signaling and NFkB signaling (more prononced in UnTx) and E2F/Cell cyle (more elevated in DEL.wk8).  
+  
+  
+Print Session info
+```{r session-info}
+sessionInfo()
+```

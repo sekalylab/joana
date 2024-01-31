@@ -2,12 +2,16 @@
 R code to reproduce the transcriptomic analysis of the Dias/Koup project  
 
 ## List of figures:  
-[Fig. 6AB](#fig-6ab)
-
+[Fig. 6A-B](#fig-6ab), [Fig. 6C](#fig-6c)  
+  
 ### Fig. 6A-B  
-![Fig. 6AB](figure/fig6ab.png)  
+![Fig. 6A-B](figure/fig6ab.png)  
 Fig. 6A-B: [R code [MD]](code/20230203_Joana.fig6ab.md)  
 
+### Fig. 6C
+![Fig. 6C](figure/fig6c.png)
+Fig. 6C: [R code [MD]](code/20220316_Joana2.fig6c.md)
+  
 ## Supplemental material
 
 ### a. Set 1 RNA-Seq analysis:
@@ -28,3 +32,8 @@ output:
 - baseline-substracted SeqExpressionSet: [[RDA]](output/joana.esetBaselined.RData)  
 - DGEGLM list: [[RDA]](output/joana.fits.RData)
 - GSEA output (see data release)
+
+### b. Set 2 RNA-Seq analysis:
+output:
+- baseline-substracted SeqExpressionSet: [[RDA]](output/joana2.esetBaselined.RData)
+- fGSEA output (see data release)  
