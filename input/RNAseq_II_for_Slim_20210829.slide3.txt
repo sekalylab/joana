@@ -1,0 +1,13 @@
+NHP group	Monkey ID
+UnTx	DGM4
+UnTx	DH28
+UnTx	DGA7
+UnTx	DGG6
+WT bNAb Tx	DGG4
+WT bNAb Tx	DGX4
+WT bNAb Tx	DGL9
+WT bNAb Tx	DH51
+DEL bNAb Tx	DGX0
+DEL bNAb Tx	DGH1
+DEL bNAb Tx	DH41
+DEL bNAb Tx	DHBC
